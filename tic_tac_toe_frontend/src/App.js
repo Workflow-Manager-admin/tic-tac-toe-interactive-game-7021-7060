@@ -415,19 +415,27 @@ function App() {
                 onSurrender={handleSurrender}
                 disableActions={controlsDisabled || isGameOver}
               />
-              <div className="user-info">
-                Logged in as <strong>{user.username}</strong>
-                <button className="btn logout-btn" onClick={handleLogout}>
-                  Log out
+              <div className="user-info" role="region" aria-label="User information" style={{minWidth: 0}}>
+                <span>
+                  <strong style={{color: "#1976D2"}} aria-label="User">{user.username}</strong>
+                </span>
+                <button
+                  className="btn logout-btn"
+                  onClick={handleLogout}
+                  aria-label="Log out"
+                  tabIndex={0}
+                  style={{marginTop: 5, marginBottom: 5}}
+                >
+                  Log&nbsp;out
                 </button>
                 {playerSymbol &&
-                  <span>Your symbol: <strong>{playerSymbol}</strong></span>
+                  <span>Your symbol: <strong aria-label="Your symbol" style={{color: "#FFC107"}}>{playerSymbol}</strong></span>
                 }
                 {opponent &&
-                  <span>Opponent: <strong>{opponent}</strong></span>
+                  <span>Opponent: <strong aria-label="Opponent" style={{color: "#1A1A1A"}}>{opponent}</strong></span>
                 }
                 {gameStatus &&
-                  <span>Status: <strong>{gameStatus}</strong></span>
+                  <span>Status: <strong aria-label="Game status" style={{color: "#41cf89"}}>{gameStatus}</strong></span>
                 }
               </div>
             </div>
