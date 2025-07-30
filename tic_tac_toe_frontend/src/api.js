@@ -4,6 +4,69 @@
 //
 const BASE_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
+// WebSocket base URL (assume ws:// on localhost, wss:// in production—adjust as needed)
+const WS_URL =
+  (process.env.REACT_APP_WS_URL)
+    || BASE_URL.replace(/^http/, 'ws') + '/ws/game'; // Default ws path: /ws/game
+
+let wsInstance = null;
+/**
+ * Create and manage a WebSocket connection with simple pub/sub for real-time game events.
+ * Usage:
+ *   openGameWebSocket(gameId, onMessageCb), where onMessageCb takes {event, payload}
+ * Returns a close() method.
+ */
+export function openGameWebSocket(gameId, onMessage, jwtToken = null) {
+  if (wsInstance) {
+    wsInstance.close();
+    wsInstance = null;
+  }
+  // Compose query params for connection auth if needed
+  const token = jwtToken || jwt;
+  const url = WS_URL + `/${gameId}` + (token ? `?token=${encodeURIComponent(token)}` : '');
+
+  wsInstance = new window.WebSocket(url);
+
+  wsInstance.onopen = () => {
+    // Can send initial message if needed
+    // wsInstance.send(JSON.stringify({ type: "subscribe", gameId }));
+  };
+  wsInstance.onmessage = (evt) => {
+    let data;
+    try {
+      data = JSON.parse(evt.data);
+    } catch {
+      data = { event: 'unknown', payload: evt.data };
+    }
+    if (onMessage) onMessage(data);
+  };
+  wsInstance.onerror = (err) => {
+    // Optionally forward error events
+    if (onMessage)
+      onMessage({ event: 'error', payload: err });
+  };
+  wsInstance.onclose = () => {
+    // Optionally send disconnect event
+    if (onMessage)
+      onMessage({ event: 'closed', payload: null });
+    wsInstance = null;
+  };
+  return {
+    close: () => {
+      if (wsInstance) {
+        wsInstance.close();
+        wsInstance = null;
+      }
+    },
+    send: (msgObj) => {
+      if (wsInstance && wsInstance.readyState === 1) {
+        wsInstance.send(JSON.stringify(msgObj));
+      }
+    },
+    socket: wsInstance,
+  };
+}
+
 let jwt = null;
 export function setJWT(token) {
   jwt = token;

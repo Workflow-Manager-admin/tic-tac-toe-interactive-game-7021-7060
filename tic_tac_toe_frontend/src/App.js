@@ -6,7 +6,7 @@ import MoveHistorySidebar from './MoveHistorySidebar';
 import NotificationToast from './NotificationToast';
 import LoginForm from './LoginForm';
 import RegisterForm from './RegisterForm';
-import { apiFetch, setJWT, getJWT } from './api';
+import { apiFetch, setJWT, getJWT, openGameWebSocket } from './api';
 
 // PUBLIC_INTERFACE
 /**
@@ -47,7 +47,11 @@ function App() {
   const [notification, setNotification] = useState('');
   const [notifType, setNotifType] = useState('info');
 
-  // For polling (board updates)
+  // For real-time: WebSocket wiring
+  const wsRef = useRef();
+  const wsGameId = useRef(null);
+  const [wsConnected, setWsConnected] = useState(false);
+  // For fallback polling (legacy/if WS fails)
   const pollIntervalMs = 2000;
   const pollRef = useRef();
   const pollActiveRef = useRef(false);
@@ -143,8 +147,7 @@ function App() {
       setNotification("New game created!");
       setNotifType("success");
       await syncGameState(result.game_id);
-      pollRef.current = setInterval(() => periodicPoll(result.game_id), pollIntervalMs);
-      pollActiveRef.current = true;
+      setupGameWebSocket(result.game_id);
     } catch (err) {
       setNotification(err.message || "Error creating game");
       setNotifType("error");
@@ -173,8 +176,7 @@ function App() {
       setNotification("Joined game!");
       setNotifType("success");
       await syncGameState(result.game_id);
-      pollRef.current = setInterval(() => periodicPoll(result.game_id), pollIntervalMs);
-      pollActiveRef.current = true;
+      setupGameWebSocket(result.game_id);
     } catch (err) {
       setNotification(err.message || "Failed to join game");
       setNotifType("error");
@@ -196,7 +198,7 @@ function App() {
       setMoves([]); setCurrentMove(0);
       setIsGameOver(true);
       setGameStatus("surrendered");
-      stopPolling();
+      stopGameWebSocket();
     } catch (err) {
       setNotification(err.message || "Surrender failed");
       setNotifType("error");
@@ -235,7 +237,9 @@ function App() {
       setOpponent(statusResult.opponent_username || opponent);
       setIsGameOver(statusResult.is_over);
       setGameStatus(statusResult.status || "");
-      if (statusResult.is_over) stopPolling();
+      if (statusResult.is_over) {
+        stopGameWebSocket();
+      }
       if (statusResult.winner) {
         setNotification(`Game over. Winner: ${statusResult.winner}`);
         setNotifType('success');
@@ -247,26 +251,74 @@ function App() {
     }
   }
 
-  // Polling for game state (until websocket support)
+  // --- Real-time WebSocket game synchronization ---
+  // Call this whenever a game is (re)joined/created to hook up WS updates
+  function setupGameWebSocket(newGameId) {
+    stopGameWebSocket();
+    wsGameId.current = newGameId;
+    if (!newGameId || !jwtToken) return;
+    wsRef.current = openGameWebSocket(newGameId, (data) => {
+      if (data.event === "state") {
+        // { board, moves, is_over, winner, ... }
+        setBoard(data.payload.board || [[null,null,null],[null,null,null],[null,null,null]]);
+        setMoves(data.payload.moves || []);
+        setCurrentMove((data.payload.moves || []).length);
+        setPlayerSymbol(data.payload.player_symbol || playerSymbol);
+        setOpponent(data.payload.opponent_username || opponent);
+        setIsGameOver(data.payload.is_over);
+        setGameStatus(data.payload.status || "");
+        if (data.payload.is_over) {
+          stopGameWebSocket();
+        }
+        if (data.payload.winner) {
+          setNotification(`Game over. Winner: ${data.payload.winner}`);
+          setNotifType('success');
+          setIsGameOver(true);
+        }
+      } else if (data.event === "move") {
+        // Got a new move – update state
+        setMoves(m => [...(m || []), data.payload]);
+        setBoard(data.payload.board || board);
+      } else if (data.event === "game_over") {
+        setIsGameOver(true);
+        setGameStatus("over");
+        setNotification((data.payload && data.payload.msg) ? data.payload.msg : "Game over!");
+        setNotifType("success");
+        stopGameWebSocket();
+      } else if (data.event === "error") {
+        setNotification("WS error: " + (data.payload?.message || "Realtime connection failed"));
+        setNotifType("error");
+        stopGameWebSocket();
+      } else if (data.event === "closed") {
+        setWsConnected(false);
+      } else if (data.event === "connected" || data.event === "open") {
+        setWsConnected(true);
+      }
+    }, jwtToken);
+  }
+  function stopGameWebSocket() {
+    wsGameId.current = null;
+    if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+  }
+  // Fallback: Only poll if WebSocket is not up
   const periodicPoll = useCallback(
     (id) => {
-      syncGameState(id);
+      if (!wsConnected) syncGameState(id);
     },
-    [gameId]
+    [gameId, wsConnected]
   );
-  function stopPolling() {
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = null;
-    pollActiveRef.current = false;
-  }
   useEffect(() => {
-    if (gameId && jwtToken && !pollActiveRef.current) {
+    if (gameId && jwtToken && !wsConnected && !pollActiveRef.current) {
       pollRef.current = setInterval(() => periodicPoll(gameId), pollIntervalMs);
       pollActiveRef.current = true;
     }
-    return () => stopPolling();
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
+      pollActiveRef.current = false;
+    };
     // eslint-disable-next-line
-  }, [gameId, jwtToken]);
+  }, [gameId, jwtToken, wsConnected]);
 
   // Move history: select move for board preview
   function handleSelectMove(idx) {
@@ -292,15 +344,24 @@ function App() {
     return b;
   }
 
-  // Clean up polling on logout/game over
+  // Clean up polling + realtime on logout/game over
   useEffect(() => {
-    if (!gameId || isGameOver) stopPolling();
+    if (!gameId || isGameOver) {
+      stopGameWebSocket();
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
+      pollActiveRef.current = false;
+    }
     // eslint-disable-next-line
   }, [gameId, isGameOver]);
 
   // On mount, if logged in, fetch available games
   useEffect(() => {
     if (jwtToken) fetchGamesList();
+    // If you are already in a game, reconstruct WebSocket on reload
+    if (jwtToken && gameId) {
+      setupGameWebSocket(gameId);
+    }
     // eslint-disable-next-line
   }, [jwtToken]);
 
